@@ -4,7 +4,8 @@ import argparse
 import os
 import time
 import numpy as np
-from models.modules import Generator
+from models.generator import Generator
+from utils.util import mu_law_encode, mu_law_decode
 
 def attempt_to_restore(generate, checkpoint_dir, use_cuda):
     checkpoint_list = os.path.join(checkpoint_dir, 'checkpoint')
@@ -28,8 +29,8 @@ def load_checkpoint(checkpoint_path, use_cuda):
 def create_model(args):
 
     generator = Generator(args.local_condition_dim, args.z_dim)
-    
-    return generator 
+
+    return generator
 
 def synthesis(args):
 
@@ -38,36 +39,34 @@ def synthesis(args):
        attempt_to_restore(model, args.resume, args.use_cuda)
 
     device = torch.device("cuda" if args.use_cuda else "cpu")
+    model.to(device)
 
     output_dir = "samples"
     os.makedirs(output_dir, exist_ok=True)
 
-    lists = []
+    avg_rtf = []
     for filename in os.listdir(os.path.join(args.input, 'mel')):
-        lists.append(filename)
-    start = time.time()
-    conditions = [np.load(os.path.join(args.input, 'mel', filename))
-            for filename in lists]
-    lengths = [condition.shape[0] for condition in conditions]
-    max_len = max(lengths)
-    conditions = [np.concatenate((condition, np.zeros((max_len - condition.shape[0],
-        condition.shape[1]))), axis=0) for condition in conditions]
+        start = time.time()
+        conditions = np.load(os.path.join(args.input, 'mel', filename))
+        conditions = torch.FloatTensor(conditions).unsqueeze(0)
+        conditions = conditions.transpose(1, 2).to(device)
 
-    conditions = np.stack(conditions)
-    conditions = torch.FloatTensor(conditions)
-    conditions = conditions.transpose(1, 2).to(device)
-    batch_size = conditions.size()[0]
-    z = torch.randn(batch_size, args.z_dim).to(device)
-    print(conditions.shape)
-    audios = model(conditions, z)
-    audios = audios.squeeze().detach().numpy()
-    print(audios.shape)
-    for (i, filename) in enumerate(lists):
+        batch_size = conditions.size()[0]
+        z = torch.randn(batch_size, args.z_dim).to(device).normal_(0.0, 1.0)
+        audios = model(conditions, z)
+        audios = audios.cpu().squeeze().detach().numpy()
+        print(audios.shape)
         name = filename.split('.')[0]
         sample = np.load(os.path.join(args.input, 'audio', filename))
+        sample = mu_law_decode(mu_law_encode(sample))
         save_wav(np.squeeze(sample), '{}/{}_target.wav'.format(output_dir, name))
-        save_wav(np.asarray(audios[i])[:len(sample)], '{}/{}.wav'.format(output_dir, name))
-    print("Time used: {:.3f}".format(time.time() - start))
+        save_wav(np.asarray(audios), '{}/{}.wav'.format(output_dir, name))
+        time_used = time.time() - start
+        rtf = time_used / (len(audios) / 24000)
+        avg_rtf.append(rtf)
+        print("Time used: {:.3f}, RTF: {:.4f}".format(time_used, rtf))
+
+    print("Average RTF: {:.3f}".format(sum(avg_rtf) / len(avg_rtf)))
 
 def main():
 
@@ -82,7 +81,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', type=str, default='data/test', help='Directory of tests data')
     parser.add_argument('--num_workers',type=int, default=4, help='Number of dataloader workers.')
-    parser.add_argument('--resume', type=str, default="ema_logdir")
+    parser.add_argument('--resume', type=str, default="logdir")
     parser.add_argument('--local_condition_dim', type=int, default=80)
     parser.add_argument('--z_dim', type=int, default=128)
     parser.add_argument('--use_cuda', type=_str_to_bool, default=False)
